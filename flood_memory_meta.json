@@ -1,0 +1,26 @@
+{
+  "generated_at": "2026-04-27T16:59:35.936537",
+  "n_gauges": 242,
+  "n_clusters": 4,
+  "days_history": 730,
+  "embedding": "UMAP",
+  "pca_components": 6,
+  "pca_variance_explained": 0.9573073547809751,
+  "cluster_names": {
+    "0": "Stable Baseflow",
+    "1": "Slow Risers",
+    "2": "Holders",
+    "3": "Stable Baseflow"
+  },
+  "feature_cols": [
+    "flashiness_index",
+    "time_to_peak_hr",
+    "recession_rate",
+    "peak_duration_hr",
+    "cv_discharge",
+    "seasonal_variability",
+    "base_flow_index",
+    "mean_discharge",
+    "n_events"
+  ]
+}
