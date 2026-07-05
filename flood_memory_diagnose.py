@@ -16,6 +16,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
 from sklearn.cluster import KMeans
 from sklearn.metrics import silhouette_score
+from scipy.optimize import linear_sum_assignment
 import plotly.express as px
 import plotly.graph_objects as go
 
@@ -130,36 +131,62 @@ print(cluster_stats.to_string())
 # RE-ASSIGN PERSONALITY NAMES + EXPORT UPDATED GEOJSON
 # ══════════════════════════════════════════════════════════════════════════════
 
-PERSONALITY_NAMES  = ["Flashers", "Slow Risers", "Holders", "Stable Baseflow",
-                      "Tidal Mixers", "Pulse Driven", "Rain Shadow", "Nival"]
-PERSONALITY_COLORS = ["#FF4757", "#2ED573", "#1E90FF", "#FFA502",
-                      "#A29BFE", "#FF6B81", "#26de81", "#fd9644"]
+PERSONALITY_COLORS = {
+    "Flashers": "#FF4757", "Slow Risers": "#2ED573", "Holders": "#1E90FF",
+    "Stable Baseflow": "#FFA502", "Pulse Driven": "#A29BFE",
+}
 
-def assign_personality(row, idx):
-    fi   = row.get("flashiness_index", 0) or 0
-    bfi  = row.get("base_flow_index",  0) or 0
-    ttp  = row.get("time_to_peak_hr",  0) or 0
-    pd_h = row.get("peak_duration_hr", 0) or 0
-    rec  = row.get("recession_rate",   0) or 0
-    cv   = row.get("cv_discharge",     0) or 0
+# Only the 5 archetypes actually defined in README.md get used. The original
+# code also listed "Tidal Mixers", "Rain Shadow", "Nival" as possible labels,
+# but those three are never given a behavioral definition anywhere in the
+# repo -- using them would mean inventing meaning that isn't documented, so
+# they're excluded here rather than silently assigned.
+#
+# Each archetype is defined as a signed combination of z-scored features
+# (z relative to the full gauge population), reflecting the behavioral
+# description in README.md. Every cluster is then assigned to its best-fit
+# archetype via optimal (Hungarian) linear-sum assignment on these scores,
+# which finds the globally best one-to-one labeling and makes duplicate
+# labels structurally impossible -- no threshold cutoffs, no fallback list,
+# no collision handling needed.
+ARCHETYPE_WEIGHTS = {
+    # feature: weight (positive = "high value supports this archetype")
+    "Flashers":         {"flashiness_index": 1.0, "recession_rate": 1.0,
+                          "time_to_peak_hr": -1.0, "peak_duration_hr": -1.0},
+    "Slow Risers":      {"time_to_peak_hr": 1.0, "peak_duration_hr": 0.5,
+                          "flashiness_index": -1.0},
+    "Holders":          {"peak_duration_hr": 1.0, "time_to_peak_hr": 0.5},
+    "Stable Baseflow":  {"base_flow_index": 1.0, "cv_discharge": -1.0,
+                          "flashiness_index": -1.0},
+    "Pulse Driven":     {"seasonal_variability": 1.0, "flashiness_index": -1.0},
+}
 
-    if fi > 0.015 and ttp < 6 and rec > 0.2:  return "Flashers"
-    elif bfi > 0.70 and cv < 1.5:             return "Stable Baseflow"
-    elif ttp > 24:                             return "Slow Risers"
-    elif pd_h > 50:                            return "Holders"
-    elif cv > 2.5:                             return "Pulse Driven"
-    else:                                      return PERSONALITY_NAMES[idx % len(PERSONALITY_NAMES)]
+def compute_archetype_scores(cluster_stats, population_mean, population_std):
+    """Z-score each cluster's median feature vector against the full gauge
+    population, then score it against every archetype's defining weights.
+    Returns a (clusters x archetypes) score matrix.
+    """
+    archetypes = list(ARCHETYPE_WEIGHTS.keys())
+    z = (cluster_stats - population_mean) / population_std
+    scores = pd.DataFrame(index=cluster_stats.index, columns=archetypes, dtype=float)
+    for arch, weights in ARCHETYPE_WEIGHTS.items():
+        s = sum(z[feat] * w for feat, w in weights.items() if feat in z.columns)
+        scores[arch] = s
+    return scores
 
-name_map, used = {}, set()
-for cid, row in cluster_stats.iterrows():
-    name = assign_personality(row, cid)
-    if name in used:
-        name = PERSONALITY_NAMES[cid % len(PERSONALITY_NAMES)]
-    used.add(name)
-    name_map[cid] = name
+population_mean = df_clean[existing_cols].mean()
+population_std = df_clean[existing_cols].std()
+archetype_scores = compute_archetype_scores(cluster_stats, population_mean, population_std)
 
-color_map = {name: PERSONALITY_COLORS[i % len(PERSONALITY_COLORS)]
-             for i, name in enumerate(name_map.values())}
+# Hungarian assignment maximizes total match quality; linear_sum_assignment
+# minimizes cost, so we negate scores. Pads with dummy rows/cols automatically
+# when #clusters != #archetypes (scipy handles rectangular matrices).
+cost = -archetype_scores.values
+row_ind, col_ind = linear_sum_assignment(cost)
+name_map = {archetype_scores.index[r]: archetype_scores.columns[c]
+            for r, c in zip(row_ind, col_ind)}
+
+color_map = {name: PERSONALITY_COLORS.get(name, "#999999") for name in name_map.values()}
 
 df_clean["cluster_name"] = df_clean["cluster"].map(name_map)
 

@@ -552,42 +552,52 @@ df_clean["umap_x"] = X_2d[:, 0]
 df_clean["umap_y"] = X_2d[:, 1]
 
 # ── Assign cluster names based on dominant behavioral signature ───────────────
-PERSONALITY_NAMES = ["Flashers", "Slow Risers", "Holders", "Stable Baseflow", "Tidal Mixers",
-                     "Pulse Driven", "Rain Shadow", "Nival"]
-PERSONALITY_COLORS = ["#FF4757", "#2ED573", "#1E90FF", "#FFA502", "#A29BFE",
-                      "#FF6B81", "#26de81", "#fd9644"]
+# Only the 5 archetypes actually defined in README.md are used. "Tidal Mixers",
+# "Rain Shadow", and "Nival" appeared in the original name list but are never
+# given a behavioral definition anywhere in the repo, so they're excluded
+# rather than assigned meaning that isn't documented.
+#
+# Each archetype is a signed combination of z-scored features (z relative to
+# the full gauge population). Clusters are matched to archetypes via optimal
+# (Hungarian) linear-sum assignment on these scores -- this finds the globally
+# best one-to-one labeling and makes duplicate labels structurally impossible,
+# replacing the earlier threshold-based heuristic (which could leave a
+# cluster with no clear match, or -- before an earlier fix -- assign the same
+# name to two different clusters).
+from scipy.optimize import linear_sum_assignment
+
+PERSONALITY_COLORS = {
+    "Flashers": "#FF4757", "Slow Risers": "#2ED573", "Holders": "#1E90FF",
+    "Stable Baseflow": "#FFA502", "Pulse Driven": "#A29BFE",
+}
+
+ARCHETYPE_WEIGHTS = {
+    "Flashers":         {"flashiness_index": 1.0, "recession_rate": 1.0,
+                          "time_to_peak_hr": -1.0, "peak_duration_hr": -1.0},
+    "Slow Risers":      {"time_to_peak_hr": 1.0, "peak_duration_hr": 0.5,
+                          "flashiness_index": -1.0},
+    "Holders":          {"peak_duration_hr": 1.0, "time_to_peak_hr": 0.5},
+    "Stable Baseflow":  {"base_flow_index": 1.0, "cv_discharge": -1.0,
+                          "flashiness_index": -1.0},
+    "Pulse Driven":     {"seasonal_variability": 1.0, "flashiness_index": -1.0},
+}
 
 cluster_stats = df_clean.groupby("cluster")[FEATURE_COLS].median()
+population_mean = df_clean[FEATURE_COLS].mean()
+population_std = df_clean[FEATURE_COLS].std()
+z = (cluster_stats - population_mean) / population_std
 
-def _assign_personality(stats_row, idx):
-    """Heuristic: rank by flashiness, base flow, time to peak."""
-    fi = stats_row.get("flashiness_index", 0) or 0
-    bfi = stats_row.get("base_flow_index", 0) or 0
-    ttp = stats_row.get("time_to_peak_hr", 0) or 0
-    pd_h = stats_row.get("peak_duration_hr", 0) or 0
+archetypes = list(ARCHETYPE_WEIGHTS.keys())
+archetype_scores = pd.DataFrame(index=cluster_stats.index, columns=archetypes, dtype=float)
+for arch, weights in ARCHETYPE_WEIGHTS.items():
+    archetype_scores[arch] = sum(z[feat] * w for feat, w in weights.items() if feat in z.columns)
 
-    if fi > 0.05 and ttp < 6:
-        return "Flashers"
-    elif bfi > 0.6:
-        return "Stable Baseflow"
-    elif ttp > 48:
-        return "Slow Risers"
-    elif pd_h > 200:
-        return "Holders"
-    else:
-        return PERSONALITY_NAMES[idx % len(PERSONALITY_NAMES)]
-
-name_map = {}
-used_names = set()
-for cid, row in cluster_stats.iterrows():
-    name = _assign_personality(row, cid)
-    if name in used_names:
-        name = PERSONALITY_NAMES[cid % len(PERSONALITY_NAMES)]
-    used_names.add(name)
-    name_map[cid] = name
+cost = -archetype_scores.values  # Hungarian minimizes cost; we want to maximize match score
+row_ind, col_ind = linear_sum_assignment(cost)
+name_map = {archetype_scores.index[r]: archetype_scores.columns[c] for r, c in zip(row_ind, col_ind)}
 
 df_clean["cluster_name"] = df_clean["cluster"].map(name_map)
-color_map = {name: PERSONALITY_COLORS[i % len(PERSONALITY_COLORS)] for i, name in enumerate(name_map.values())}
+color_map = {name: PERSONALITY_COLORS.get(name, "#999999") for name in name_map.values()}
 
 print(f"\n✓ Cluster assignments:")
 for cid, name in name_map.items():
